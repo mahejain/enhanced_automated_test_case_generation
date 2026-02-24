@@ -2,14 +2,14 @@ import requests
 import json
 import pprint
 import copy
+import os
 from config import *
 
-model_name = "openai/gpt-4-1106-preview"
 model_name = "anthropic/claude-instant-1"
 
 url = 'https://api.getknit.ai/v1/router/run'
 headers = {
-    'x-auth-token': "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyIjp7ImlkIjoiMTE0MTY3Mzc5MzMxNTY5NTEyNjM2In0sImlhdCI6MTcyNjY4ODc4MywiZXhwIjoxNzI3NzY4NzgzfQ.5Zs3Bqe4qmiYRtxEStQx_irYboksR9QNwundB77at0s",
+    'x-auth-token': "",
     'Content-Type': 'application/json'
 }
 
@@ -78,9 +78,7 @@ range_data = {
             "content": '''Now generate output for the input document: {}'''
         }
     ],
-    "model": {
-	    "name": model_name
-    },
+    "model": model_name,
     "variables": []
 }
 
@@ -176,9 +174,7 @@ data = {
             "content": '''Please Generate output for the input document: {}'''
         }
     ],
-    "model": {
-	    "name": model_name
-    },
+    "model": model_name,
     "variables": []
 }
 
@@ -188,10 +184,7 @@ def pre_process(FRD):
         FRD = FRD.replace(char, ' ')
     return FRD
 
-def get_few_shot_prompting_response(
-  FRD,
-  auth_token="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyIjp7ImlkIjoiMTE0MTY3Mzc5MzMxNTY5NTEyNjM2In0sImlhdCI6MTcyNjY4ODc4MywiZXhwIjoxNzI3NzY4NzgzfQ.5Zs3Bqe4qmiYRtxEStQx_irYboksR9QNwundB77at0s"
-  ):
+def get_few_shot_prompting_response(FRD):
     global url, headers, data, range_data
     
     part1 = FRD[:FRD.find('_RANGE_END_TAG_')]
@@ -200,7 +193,7 @@ def get_few_shot_prompting_response(
     range_data_copy = copy.deepcopy(range_data)
         
     # FRD = pre_process(FRD)
-    headers['x-auth-token'] = auth_token
+    headers['x-auth-token'] = os.getenv("KNIT_TOKEN")
     data_copy['messages'][1]['content'] = data_copy['messages'][1]['content'].format(FRD)
     
     response = requests.post(url, headers=headers, json=data_copy)
@@ -208,7 +201,7 @@ def get_few_shot_prompting_response(
     print(response_dict)
     dict_string = response_dict['responseText'][response_dict['responseText'].find('{'):response_dict['responseText'].rfind('}')+1]
 
-    few_shot_response = eval(dict_string)
+    few_shot_response = json.loads(dict_string)
     
     if FRD.find('_RANGE_END_TAG_') != -1:
       range_data_copy['messages'][1]['content'] = range_data_copy['messages'][1]['content'].format(part1)
@@ -216,7 +209,7 @@ def get_few_shot_prompting_response(
       response_dict = response.json()
       dict_string = response_dict['responseText'][response_dict['responseText'].find('{'):response_dict['responseText'].rfind('}')+1]
 
-      ranges_few_shot_response = eval(dict_string)
+      ranges_few_shot_response = json.loads(dict_string)
 
       few_shot_response['ranges'] = ranges_few_shot_response
     else:
@@ -254,4 +247,5 @@ if __name__ == "__main__":
     delta_time_period = new_time_period - t0
     '''
     response = get_few_shot_prompting_response(FRD)
+
     

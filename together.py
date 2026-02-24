@@ -6,7 +6,7 @@ import copy
 
 url = 'https://api.getknit.ai/v1/router/run'
 headers = {
-    'x-auth-token': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyIjp7ImlkIjoiMTEzMjcyNTc0OTM0MjAyMDAzMzE4In0sImlhdCI6MTcxNDQ2MjQzMywiZXhwIjoxNzE1NTQyNDMzfQ.5N23ymdqa3swMb2x9qY7vtiUn05wP6eJB0V06Ogy6bE',
+    'x-auth-token': '',
     'Content-Type': 'application/json'
 }
 

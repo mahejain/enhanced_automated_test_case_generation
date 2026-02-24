@@ -1,6 +1,5 @@
 import pandas as pd
 import numpy as np
-import itertools
 import matplotlib.pyplot as plt
 import warnings
 import math
@@ -11,31 +10,81 @@ import networkx as nx
 import streamlit as st
 import gravis as gv
 import streamlit.components.v1 as components
-from few_shot_prompting import get_few_shot_prompting_response as get_few_shot_response
+# from few_shot_prompting import get_few_shot_prompting_response as get_few_shot_response
+from prompting import get_few_shot_prompting_response as get_few_shot_response
+from validation import filter_valid_cases
+import random
+import re 
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+# logging.basicConfig(
+#     level=logging.ERROR,
+#     format="%(asctime)s - %(levelname)s - %(message)s"
+# )
+
+logger = logging.getLogger(__name__)
+
 
 confusables = [
     ('^', '**'),
     ('acos', 'cos')
 ]
 
+# ======================================================
+# PREPROCESSING FUNCTIONS
+# ======================================================
+
 # remove confusables
-def pre_process_equations(equations):
+def pre_process_equations(equations: list) -> None:
     for equation in equations:
         for confusable in confusables:
             equation['equation'] = equation['equation'].replace(confusable[0], confusable[1])
             if equation['condition']:
                 equation['condition'] = equation['condition'].replace(confusable[0], confusable[1])
 
+        # ---- FIX CONDITION FORMAT ----
+        if equation['condition']:
+            cond = equation['condition'].strip()
+
+            # Remove leading "if"
+            if cond.lower().startswith("if "):
+                cond = cond[3:].strip()
+
+            # Remove trailing "then"
+            if cond.lower().endswith(" then"):
+                cond = cond[:-5].strip()
+
+            # Fix Enabled / Not_Enabled pattern
+            cond = re.sub(
+                r'(\w+)\s+Enabled',
+                r'\1 == "enabled"',
+                cond
+            )
+
+            cond = re.sub(
+                r'(\w+)\s+Not_Enabled',
+                r'\1 == "not_enabled"',
+                cond
+            )
+
+            equation['condition'] = cond
+
 # generate the list of values for each independant variables
-def pre_process_ranges(ranges, edge_cases_only=True):
+def pre_process_ranges(ranges: dict, edge_cases_only: bool = True) -> dict:
     processed_ranges = {}
     for var, range_value in ranges.items():
         if isinstance(range_value[0], int) and isinstance(range_value[1], int):
             edge_size = 1
-            step = range_value[2] if range_value[2] != 0 else 1  # Check if step is zero
+            step = range_value[2] if range_value[2] != 0 else 1  
             processed_ranges[var] = list(np.arange(range_value[0], range_value[1] + 1, step))
             if edge_cases_only:
-                processed_ranges[var] = processed_ranges[var][:edge_size] + processed_ranges[var][-edge_size:]
+                vals = processed_ranges[var]
+                processed_ranges[var] = vals[:edge_size] + vals[-edge_size:]
         else:
             processed_ranges[var] = range_value
     return processed_ranges
@@ -54,14 +103,15 @@ def add_pre_requisites(equations, dependant_variables, variables):
         equation["dependant"] = condition is not None
         
         for var in variables:
-            if var in rhs:
+            if re.search(rf'\b{var}\b', rhs):
                 equation['calculation_pre_requisites'].append(var)
                 if var in dependant_variables:
                     equation['calculation_pre_requisites_dependant'].append(var)
-            if condition and var in condition:
+            if condition and re.search(rf'\b{var}\b', condition):
                 equation['condition_pre_requisites'].append(var)
                 if var in dependant_variables:
                     equation['condition_pre_requisites_dependant'].append(var)
+
 
 def add_equation_conditions(equations):
     equations_dict = {}
@@ -73,11 +123,24 @@ def add_equation_conditions(equations):
             equations_dict[lhs] = [equation]
     return equations_dict
 
-def check_cyclic_dependancy(equations):
-    for equation in equations:
-        lhs = equation['equation'].split('=')[0].strip()
-        pre_requisites = set(equation['calculation_pre_requisites'] + equation['condition_pre_requisites'])
-        # yet to implement
+
+def check_cyclic_dependancy(equations_dict):
+    visited = set()
+    stack = set()
+    def dfs(var):
+        if var in stack:
+            raise ValueError(f"Cyclic dependency detected involving '{var}'")
+        if var in visited:
+            return
+        stack.add(var)
+        for eq in equations_dict.get(var, []):
+            for dep in eq['calculation_pre_requisites_dependant']:
+                dfs(dep)
+        stack.remove(var)
+        visited.add(var)
+    for variable in equations_dict:
+        dfs(variable)
+
 
 def topological_sort(dependant_variables, equations_dict):
     sorted_variables = []
@@ -103,54 +166,126 @@ def topological_sort(dependant_variables, equations_dict):
 
     return sorted_variables
 
-def add_ranges_for_miscellaneous(variables, dependant_variables, independant_variables, ranges, streamlit=False):
-    miscellaneous_variables = [var for var in variables if var not in dependant_variables and var not in independant_variables]
-    if len(miscellaneous_variables) > 0:
-        warning = f'Variable/s missing for implementation: {miscellaneous_variables}'
-        warnings.warn(warning)
 
-        for miscellaneous_variable in miscellaneous_variables:
-            start = 50
-            end = 100
-            step = 20
-            warning = f'Assuming values for {miscellaneous_variable} as {start} to {end} with step {step}'
-            print(warning[:])
-            ranges[miscellaneous_variable] = [start, end, step]
-            warnings.warn(warning)
-            independant_variables.append(miscellaneous_variable)
-            if streamlit:
-                st.warning(f' Warning: Assuming values for {miscellaneous_variable} as {start} to {end} with step {step}', icon='⚠️')
+def extract_equality_constraints(equations):
+    constraints = {}
+    for eq in equations:
+        if eq.get('condition'):
+            # Find patterns like 'var == value' (supports floats/ints)
+            matches = re.findall(r'(\w+)\s*==\s*([0-9.-]+)', eq['condition'])
+            for var, val in matches:
+                try:
+                    constraints[var] = float(val) if '.' in val else int(val)
+                except ValueError:
+                    pass  
+    return constraints
 
-def process_dependant_variables(equations):
-    dependant_variables = []
-    for equation in equations:
-        variable = equation['equation'].split('=')[0].strip()
-        dependant_variables.append(variable)
-    dependant_variables = list(set(dependant_variables))
-    return dependant_variables
 
-# generating different combinations of independant variables
-def initialize_data_frame(test_cases_df, independant_variable_combinations, ranges):
-    for combination in independant_variable_combinations:
-        new_row = dict(zip(ranges.keys(), combination))
-        new_row_df = pd.DataFrame([new_row])
-        test_cases_df = pd.concat([test_cases_df, new_row_df], ignore_index=True)
-    return test_cases_df
+def add_ranges_for_miscellaneous(
+    variables,
+    dependant_variables,
+    independant_variables,
+    constants,
+):
+    miscellaneous = [
+        var for var in variables
+        if var not in dependant_variables
+        and var not in independant_variables
+        and var not in constants
+    ]
+
+    if miscellaneous:
+        error_msg = (
+            f"Missing ranges for variables: {miscellaneous}. "
+            f"Please define them explicitly in FRD input."
+        )
+
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+
+
+# ======================================================
+# SAMPLING FUNCTIONS
+# ======================================================
+
+
+def monte_carlo_sampling(ranges: dict, n_samples: int = 100, constraints: dict = None, n_forced: int = 5) -> list:
+    """
+    Generate random samples, plus targeted ones to satisfy constraints.
+    - constraints: dict of {var: value} to force.
+    - n_forced: number of extra samples per constraint.
+    """
+    cached_ranges = {
+        k: (np.arange(v[0], v[1] + v[2], v[2]) if isinstance(v, list) and len(v) == 3 else v)
+        for k, v in ranges.items()
+    }
+    samples = []
+    
+    # Standard random samples
+    for _ in range(n_samples):
+        row = {}
+        for var, r in ranges.items():
+            if isinstance(r, list) and len(r) == 3:
+                low, high, step = r
+                values = cached_ranges[var]
+                row[var] = random.choice(values)
+            else:
+                row[var] = random.choice(r)
+        samples.append(row)
+    
+    # Add forced samples for each constraint
+    if constraints:
+        for var, forced_value in constraints.items():
+            if var in ranges:
+                for _ in range(n_forced):
+                    row = {}
+                    for v, r in ranges.items():
+                        if v == var:
+                            row[v] = forced_value  
+                        else:
+                            # Randomize others
+                            if isinstance(r, list) and len(r) == 3:
+                                low, high, step = r
+                                values = cached_ranges[v]
+                                row[v] = random.choice(values)
+                            else:
+                                row[v] = random.choice(r)
+                    samples.append(row)
+    
+    return samples
+
+
+def generate_monte_carlo_cases(ranges: dict, n_samples: int = 200) -> pd.DataFrame:
+    """
+    Additional random stress-test generator.
+    Returns DataFrame directly.
+    """
+
+    samples = monte_carlo_sampling(ranges, n_samples)
+    return pd.DataFrame(samples)
+
+
+# ======================================================
+# EVALUATION ENGINE
+# ======================================================
+
 
 # get statistics
 def get_statistics(dependant_variables, test_cases_df):
-    statistics = ''
+    statistics = ''  # Initialize once
     for dependant_variable in dependant_variables:
+        if dependant_variable not in test_cases_df.columns or test_cases_df[dependant_variable].isna().all():
+            logger.info(f"Statistics for {dependant_variable}: Not calculated (condition not met or error)")
+            continue
         try:
             statistics += f"Statistics for {dependant_variable}:\n"
             statistics += f"Minimum: {test_cases_df[dependant_variable].min()}\n"
             statistics += f"Maximum: {test_cases_df[dependant_variable].max()}\n"
             statistics += f"Median: {test_cases_df[dependant_variable].median()}\n"
             statistics += f"Unique values: {test_cases_df[dependant_variable].nunique()}\n\n"
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Error calculating statistics for {dependant_variable}: {e}")
     return statistics
-
 
 # get styled HTML statistics
 def get_styled_html_statistics(dependant_variables, test_cases_df):
@@ -164,8 +299,8 @@ def get_styled_html_statistics(dependant_variables, test_cases_df):
             styled_statistics += f"<tr><td>Median</td><td>{test_cases_df[dependant_variable].median()}</td></tr>"
             styled_statistics += f"<tr><td>Unique values</td><td>{test_cases_df[dependant_variable].nunique()}</td></tr>"
             styled_statistics += "</table><br>"
-        except:
-            pass
+        except Exception as e:
+            logger.error(e)
     return styled_statistics
 
 
@@ -208,7 +343,7 @@ def identify_dependancy_trend(dependant_variables, equations_dict, test_cases_df
             axs = axs.reshape(1, num_variables)
 
         for j, dependant_variable in enumerate(dependant_variables):
-            for i, independant_variable in enumerate(calc_dependant_variables[var]):
+            for i, independant_variable in enumerate(calc_dependant_variables[dependant_variable]):
                 axs[j, i].scatter(test_cases_df[independant_variable], test_cases_df[dependant_variable])
                 axs[j, i].set_title(f'{independant_variable.capitalize()} vs {dependant_variable.capitalize()}')
                 axs[j, i].set_xlabel(f'{independant_variable.capitalize()}')
@@ -217,62 +352,111 @@ def identify_dependancy_trend(dependant_variables, equations_dict, test_cases_df
         plt.tight_layout()
         if streamlit:
             st.pyplot(fig)
-        # plt.savefig('dependant_vs_independant.pdf', format='pdf', dpi=2000)
         plt.close()
-        # plt.show() 
-    except:
-        pass
+    except Exception as e:
+        logger.error(e)
 
-# fill dependant variables
-def fill_dependant_variables(dependant_variables, equations_dict, test_cases_df, namespace):
-    for variable in dependant_variables:
-        equations = equations_dict.get(variable, [])
-        for index, row in test_cases_df.iterrows():
-            for equation_info in equations:
-                equation = equation_info['equation']
-                equation_rhs = equation.split('=')[1]
-                condition = equation_info['condition']
-                calculation_pre_requisites = equation_info['calculation_pre_requisites']
-                condition_pre_requisites = equation_info['condition_pre_requisites'] 
+
+def fill_dependant_variables(
+    dependant_variables: list,
+    equations_dict: dict,
+    test_cases_df: pd.DataFrame,
+    namespace: dict
+) -> tuple:
+
+    test_cases_df["executed_requirements"] = ""
+    test_cases_df["executed_requirement_texts"] = ""
+
+    coverage_counter = {}
+    condition_hits = {}
+
+    for index in test_cases_df.index:
+
+        row_dict = test_cases_df.loc[index].to_dict()
+
+        # Execute in already topologically sorted order
+        for variable in dependant_variables:
+
+            equations = equations_dict.get(variable, [])
+
+            for eq in equations:
+
+                calc_pre = eq['calculation_pre_requisites']
+                cond_pre = eq['condition_pre_requisites']
 
                 try:
-                # Check if condition matches
-                    if not condition or eval(condition, row[:].to_dict()):
-                        # Calculate value using eval
-                            calculated_value = eval(equation_rhs, namespace, row[:].to_dict())
-                            test_cases_df.at[index, variable] = calculated_value
-                            break  
-                except:
-                        print(f'Eval failed for {equation_rhs}')
-                        print(equation_rhs, row[calculation_pre_requisites].to_dict())
-    return test_cases_df
+                    # Skip if prerequisites missing
+                    if any(pd.isna(row_dict.get(p)) for p in calc_pre + cond_pre):
+                        continue
 
-# create flow graph
-def backup_create_flow_graph(flowchart_data, directory_path, equations_dict):
-    for var, equations in equations_dict.items():
-        for equation in equations:
-            flowchart_data += [(pre_req_var, equation['equation'], equation['condition']) for pre_req_var in equation['condition_pre_requisites']]
- 
-    graph = graphviz.Digraph('Flowchart', format='png')
-    
-    for node_from, node_to, condition in flowchart_data:
-        graph.node(node_from)
-        graph.node(node_to)
-        graph.edge(node_from, node_to, label=condition)
+                    cond_ok = True
 
-    graph.render(filename=r'flowchart', format='png', cleanup=True)
+                    if eq['compiled_condition']:
+                        try:
+                            cond_result = eval(eq['compiled_condition'], namespace, row_dict)
+                        except:
+                            cond_result = False
+
+                        condition_key_true = f"{eq['id']}_condition_true"
+                        condition_key_false = f"{eq['id']}_condition_false"
+
+                        if cond_result:
+                            condition_hits[condition_key_true] = condition_hits.get(condition_key_true, 0) + 1
+                        else:
+                            condition_hits[condition_key_false] = condition_hits.get(condition_key_false, 0) + 1
+
+                        cond_ok = cond_result
+
+                    if cond_ok:
+                        logger.debug(f"Processing {eq['id']} for {variable}, cond_ok: {cond_ok}")
+                        logger.debug(f"Deps: {eq['calculation_pre_requisites']}")
+                        for dep in eq['calculation_pre_requisites']:
+                            logger.debug(f"  {dep}: in row_dict={dep in row_dict}, value={row_dict.get(dep)}, notna={pd.notna(row_dict.get(dep))}")
+                        # Check if all calculation prerequisites are available and not NaN
+                        if all(dep in row_dict and row_dict[dep] is not None and pd.notna(row_dict[dep]) for dep in eq['calculation_pre_requisites']):
+                            logger.debug(f"Evaluating {eq['id']} for {variable}. row_dict keys: {list(row_dict.keys())}")
+                            value = eval(eq['compiled_rhs'], namespace, row_dict)
+                            
+                            test_cases_df.at[index, variable] = value
+                            row_dict[variable] = value 
+
+                            req_id = eq["id"]
+                            coverage_counter[req_id] = coverage_counter.get(req_id, 0) + 1
+
+                            existing_ids = test_cases_df.at[index, "executed_requirements"]
+                            existing_texts = test_cases_df.at[index, "executed_requirement_texts"]
+
+                            test_cases_df.at[index, "executed_requirements"] = (
+                                existing_ids + "," + req_id if existing_ids else req_id
+                            )
+
+                            test_cases_df.at[index, "executed_requirement_texts"] = (
+                                existing_texts + " | " + eq["text"] if existing_texts else eq["text"]
+                            )
+
+                except Exception as e:
+                    logger.error(f"Eval failed for {variable}: {e}")
+                    continue
+
+    return test_cases_df, condition_hits
+
 
 def delete_directory_contents(directory_path):
     try:
-        shutil.rmtree(directory_path)
-        os.makedirs(directory_path)  
-        print(f"Contents of {directory_path} deleted successfully.")
+        if os.path.exists(directory_path):
+            shutil.rmtree(directory_path)
+        os.makedirs(directory_path)
+        logger.info(f"Cleared directory: {directory_path}")
     except Exception as e:
-        print(f"Error: {e}")
+        logger.error(e)
         
 
-def create_flow_graph(flowchart_data, directory_path, equations_dict):
-    print(flowchart_data, equations_dict)
+# ======================================================
+# VISUALIZATION
+# ======================================================
+
+
+def create_flow_graph(directory_path, equations_dict):
     flowchart_groups = {}
     delete_directory_contents(directory_path)
     
@@ -300,7 +484,7 @@ def create_flow_graph(flowchart_data, directory_path, equations_dict):
 
         graph.render(filename=flowchart_name, format='png', cleanup=True)
         graph_index += 1
-        flowchart_path = flowchart_name + '.png'
+        # flowchart_path = flowchart_name + '.png'
 
 
 def create_new_flow_graph(flowchart_data, directory_path, equations_dict):
@@ -341,13 +525,9 @@ def create_new_flow_graph(flowchart_data, directory_path, equations_dict):
 
                 for node_from_store in graph_nodes[node_from]:
                     graph.edge(node_from_store, equation, label=condition)
-    graph.node("a")
-    graph.edge("a", "b")
-    graph.edge("a", "c")
     graph.render(filename=flowchart_name, format='png', cleanup=True)
     graph_index += 1
-    flowchart_path = flowchart_name + '.png'
-
+    # flowchart_path = flowchart_name + '.png'
 
 # initialize edge and edge labels
 def initialize_edge_and_labels(edges, edge_labels, equations_dict):
@@ -359,11 +539,14 @@ def initialize_edge_and_labels(edges, edge_labels, equations_dict):
 
 # save to csv
 def save_to_csv(test_cases_df, path):
-    test_cases_df.to_csv(path)    
+    df = test_cases_df.copy()   # safer (don’t mutate original)
+    df.reset_index(drop=True, inplace=True)
+    df.insert(0, "test_case_no", df.index + 1)
+    df.to_csv(path, index=False) 
 
 # create interactive graph
 def create_interactive_graph(edges, streamlit=False):
-    edge_label_index = 2
+    # edge_label_index = 2
 
     G = nx.DiGraph(directed=True)
 
@@ -392,7 +575,7 @@ def create_interactive_graph(edges, streamlit=False):
 # create graph image
 def create_graph_image(edges, edge_labels, streamlit=False):
     try:
-        edge_label_index = 2
+        # edge_label_index = 2
         G = nx.DiGraph(directed=True)
 
         for edge in edges:
@@ -421,8 +604,8 @@ def create_graph_image(edges, edge_labels, streamlit=False):
         if streamlit:
             st.pyplot(fig)
         plt.close(fig)
-    except:
-        pass
+    except Exception as e:
+        print(e)
 
 # generate namespace
 def initialize_namespace():
@@ -435,70 +618,352 @@ def initialize_namespace():
 
 
 def get_few_shot_prompting_response(FRD = ''):
-    print('waiting for request response')
+    logger.info("Waiting for few-shot response")
     # output from few shot prompting
     dict_from_few_shot_prompting = get_few_shot_response(FRD)
-    print(dict_from_few_shot_prompting)
+    logger.debug(dict_from_few_shot_prompting)
     return dict_from_few_shot_prompting
 
 
-def generate_test_cases(FRD = ''):
-    edge_cases_only = True
-    limit = 20
-    edges = []
-    edge_labels = {}
-    namespace = {}
-    flowchart_data = []
+# ======================================================
+# COVERAGE & METRICS
+# ======================================================
 
-    dict_from_few_shot_prompting = get_few_shot_response(FRD=FRD)
+
+def generate_coverage_report(test_cases_df, condition_hits, all_req_ids, total_rows):
+    logger.info("\n========== REQUIREMENT COVERAGE REPORT ==========")
+
+    for req in sorted(all_req_ids):
+        # count rows where this req appears
+        rows_covered = test_cases_df["executed_requirements"].str.contains(rf"\b{req}\b", regex=True, na=False).sum()
+        percent = (rows_covered / total_rows * 100) if total_rows else 0
+
+        logger.info(f"{req:10} -> {rows_covered:5} rows  ({percent:.1f}%)")
+
+    missing = [
+        r for r in all_req_ids
+        if not test_cases_df["executed_requirements"].str.contains(rf"\b{r}\b", regex=True, na=False).any()
+    ]
+
+    if missing:
+        logger.info("\n⚠ Uncovered Requirements:")
+        for r in missing:
+            logger.info(f"   {r}")
+    else:
+        logger.info("\n✅ All requirements covered!")
+
+    logger.info("\n===== CONDITION COVERAGE =====")
+    for cond, hits in condition_hits.items():
+        percent = (hits / total_rows * 100) if total_rows else 0
+        logger.info(f"{cond:25} -> {hits:5} hits ({percent:.1f}%)")
+
+
+def compute_test_quality_metrics(df):
+    """
+    Compute quality metrics for generated test cases
+    """
+
+    logger.info("\n===== TEST QUALITY METRICS =====")
+
+    total = len(df)
+
+    # 1. Uniqueness
+    # Exclude metadata columns from uniqueness check
+    exclude_cols = ["executed_requirements", "executed_requirement_texts"]
+    data_cols = [c for c in df.columns if c not in exclude_cols]
     
-    # extracting the necessary details from few shot prompting api call 
+    unique_rows = len(df[data_cols].drop_duplicates())
+
+    uniqueness = unique_rows / total * 100
+    logger.info(f"Unique cases: {unique_rows}/{total} ({uniqueness:.1f}%)")
+
+    # 2. Edge detection (min/max frequency)
+    edge_hits = 0
+
+    for col in df.columns:
+        vals = df[col]
+        if pd.api.types.is_numeric_dtype(vals):
+            edge_hits += ((vals == vals.min()) | (vals == vals.max())).sum()
+
+    numeric_cols = df.select_dtypes(include='number')
+    edge_ratio = edge_hits / (total * len(numeric_cols.columns)) * 100
+    logger.info(f"Edge value usage: {edge_ratio:.1f}%")
+
+    # 3. Variance (diversity)
+    numeric_cols = df.select_dtypes(include='number')
+    if not numeric_cols.empty:
+        scaled = (numeric_cols - numeric_cols.mean()) / numeric_cols.std(ddof=0)
+        variance = scaled.var().mean()
+        logger.info(f"Normalized avg variance: {variance:.4f}")
+
+
+def generate_traceability_matrix(test_cases_df, path="traceability_matrix.csv"):
+    """
+    Creates Requirement Traceability Matrix (RTM)
+    Maps each test case to requirement executed
+    """
+    trace_df = test_cases_df[[
+        "executed_requirements",
+        "executed_requirement_texts"
+    ]].copy()
+
+    trace_df.insert(0, "test_case_no", range(1, len(trace_df) + 1))
+
+    trace_df.to_csv(path, index=False)
+
+    logger.info("TRACEABILITY MATRIX GENERATED")
+    logger.info("\n%s", trace_df.head())
+
+
+# ======================================================
+# VALIDATION RULE BUILDER
+# ======================================================
+
+def build_rules_from_ranges(ranges):
+    """
+    Automatically create validation rules from FRD ranges.
+    Numeric  -> range check
+    Categorical -> membership check
+    """
+
+    rules = {}
+
+    for var, values in ranges.items():
+
+        # categorical (strings list)
+        if isinstance(values[0], str):
+            allowed = set(values)
+            rules[var] = lambda x, a=allowed: x in a
+
+        # numeric range [start, end, step]
+        elif isinstance(values, list) and len(values) == 3:
+            start, end, _ = values
+            rules[var] = lambda x, s=start, e=end: s <= x <= e
+
+    return rules
+
+
+# ======================================================
+# MAIN DRIVER
+# ======================================================
+
+
+def extract_frd_details(FRD: str):
+    dict_from_few_shot_prompting = get_few_shot_response(FRD=FRD)
+
     variables = dict_from_few_shot_prompting['variables']
     equations = dict_from_few_shot_prompting['equations']
     ranges = dict_from_few_shot_prompting['ranges']
-    independant_variables = [var for var in ranges.keys()]
-    
-    dependant_variables = process_dependant_variables(equations)
-    add_ranges_for_miscellaneous(variables, dependant_variables, independant_variables, ranges)
 
-    # pre processing
+    # 🔥 BUILD equation string from lhs + rhs (CRITICAL FIX)
+    for i, eq in enumerate(equations):
+        eq["equation"] = f"{eq['lhs']} = {eq['rhs']}"
+        eq["id"] = f"REQ_{i+1}"
+        eq["text"] = eq["equation"]
+
+        if eq["lhs"] not in variables:
+            variables.append(eq["lhs"])
+
+        rhs_vars = re.findall(r'[A-Za-z_]\w*', eq["rhs"])
+        for v in rhs_vars:
+            if v not in variables and not v.isnumeric():
+                variables.append(v)
+
+    return variables, equations, ranges
+
+
+def extract_constants(equations, variables, ranges):
+    constants = {}
+    namespace_for_eval = initialize_namespace()
+
+    for eq in equations:
+        lhs, rhs = eq['equation'].split('=')
+        lhs = lhs.strip()
+        rhs = rhs.strip()
+
+        # constant = no variable in rhs
+        if not any(re.search(rf'\b{var}\b', rhs) for var in variables):
+            try:
+                value = eval(rhs, namespace_for_eval)
+                constants[lhs] = value
+                eq["is_constant"] = True  
+            except:
+                eq["is_constant"] = False
+        else:
+            eq["is_constant"] = False
+
+    # remove constants ONLY from ranges
+    for const in constants:
+        ranges.pop(const, None)
+
+    return constants, ranges, equations  
+
+
+def build_dependency_model(variables, equations, ranges, constants, edge_cases_only=True):
+
+    independant_variables = list(ranges.keys())
+
+    # Build equation dictionary FIRST
+    equations_dict = add_equation_conditions(equations)
+
+    # Now dependent variables = LHS variables
+    dependant_variables = list(equations_dict.keys())
+
+    add_ranges_for_miscellaneous(
+        variables,
+        dependant_variables,
+        independant_variables,
+        constants,
+    )
+
+    # Preprocessing
     pre_process_equations(equations)
     add_pre_requisites(equations, dependant_variables, variables)
-    
-    ranges = pre_process_ranges(ranges, edge_cases_only)
-    equations_dict = add_equation_conditions(equations)
-    print(dependant_variables)
-    
-    dependant_variables = topological_sort(dependant_variables, equations_dict)
-    print(dependant_variables)
-    variables = independant_variables+dependant_variables
 
-    # creating data frame for the test cases
-    test_cases_df = pd.DataFrame(columns=variables)
-    independant_variable_combinations = list(itertools.islice(itertools.product(*ranges.values()), limit))
-    test_cases_df = initialize_data_frame(test_cases_df, independant_variable_combinations, ranges)
+    ranges = pre_process_ranges(ranges, edge_cases_only)
+
+    # Detect cycles
+    check_cyclic_dependancy(equations_dict)
+
+    # Topological order
+    dependant_variables = topological_sort(dependant_variables, equations_dict)
+
+    # Compile expressions
+    for eq_list in equations_dict.values():
+        for eq in eq_list:
+            rhs = eq['equation'].split('=')[1].strip()
+            rhs = rhs.replace("\n", " ").strip()
+            eq['compiled_rhs'] = compile(rhs, "<string>", "eval")
+
+            if eq['condition']:
+                eq['compiled_condition'] = compile(eq['condition'], "<string>", "eval")
+            else:
+                eq['compiled_condition'] = None
+
+    variables = independant_variables + dependant_variables
+
+    return variables, dependant_variables, equations_dict, ranges
+
+
+def generate_input_samples(ranges, equations, limit=20):
+    constraints = extract_equality_constraints(equations)
     
+    samples = monte_carlo_sampling(ranges, n_samples=limit, constraints=constraints, n_forced=5)
+    base_df = pd.DataFrame(samples)
+    
+    monte_df = generate_monte_carlo_cases(ranges, n_samples=200) 
+    
+    test_cases_df = pd.concat([base_df, monte_df], ignore_index=True)
+    return test_cases_df
+
+
+def execute_equations(test_cases_df, dependant_variables, equations_dict, constants):
+
     namespace = initialize_namespace()
-    test_cases_df = fill_dependant_variables(dependant_variables, equations_dict, test_cases_df, namespace)
-    
-    print(test_cases_df.describe(include = 'all').T)
-    
+    namespace.update(constants)
+
+    # add constant columns first
+    for const, val in constants.items():
+        test_cases_df[const] = val
+
+    # run normal evaluation FIRST (creates executed columns)
+    test_cases_df, condition_hits = fill_dependant_variables(
+        dependant_variables,
+        equations_dict,
+        test_cases_df,
+        namespace
+    )
+
+    # NOW columns exist → safe to mark constants
+    for eq_list in equations_dict.values():
+        for eq in eq_list:
+            if eq.get("is_constant"):
+                test_cases_df["executed_requirements"] = (test_cases_df["executed_requirements"] + "," + eq["id"])
+
+    test_cases_df["executed_requirements"] = (test_cases_df["executed_requirements"].fillna("").str.strip(",").apply(lambda x: ",".join(sorted(set(filter(None, x.split(",")))))))
+
+    return test_cases_df, condition_hits
+
+
+def generate_reports(test_cases_df, condition_hits, equations, dependant_variables, equations_dict, original_total_rows):
+
+    all_req_ids = [eq["id"] for eq in equations]
+
+    generate_coverage_report(test_cases_df, condition_hits, all_req_ids, original_total_rows)
+
+    compute_test_quality_metrics(test_cases_df)
+
+    logger.debug(test_cases_df.describe(include='all').T)
+
+    generate_traceability_matrix(test_cases_df)
+
     statistics = get_statistics(dependant_variables, test_cases_df)
-    print(statistics)
-    
+    logger.info(statistics)
+
     save_to_csv(test_cases_df, path='test_cases_generated.csv')
     generate_html(test_cases_df, path="test_cases.html")
+
+    create_flow_graph(
+        directory_path='flowchart',
+        equations_dict=equations_dict
+    )
+
+    edges = []
+    edge_labels = {}
+    initialize_edge_and_labels(edges, edge_labels, equations_dict)
+    create_interactive_graph(edges)
+
+
+random.seed(42)
+np.random.seed(42)
+
+
+def generate_test_cases(FRD: str = '') -> pd.DataFrame:
+
+    # Extract FRD Data
+    variables, equations, ranges = extract_frd_details(FRD)
+
+    # Extract Constants
+    constants, ranges, equations = extract_constants(equations, variables, ranges)
+
+    # Build Dependency Model
+    variables, dependant_variables, equations_dict, ranges = build_dependency_model(
+        variables,
+        equations,
+        ranges,
+        constants,
+        edge_cases_only=True
+    )
+
+    conditional_vars = [
+        var for var, eq_list in equations_dict.items()
+        if any(eq.get('condition') for eq in eq_list)
+    ]
+    logger.debug(f"Auto-detected conditional_vars: {conditional_vars}")
+
+    #Generate Input Samples
+    test_cases_df = generate_input_samples(ranges, equations, limit=20)
+
+    # Execute Equations
+    test_cases_df, condition_hits = execute_equations(
+        test_cases_df,
+        dependant_variables,
+        equations_dict,
+        constants
+    )
+
+    original_total_rows = len(test_cases_df)
+
+    # Build validation rules automatically from FRD ranges
+    domain_rules = build_rules_from_ranges(ranges)
     
-    
-    create_flow_graph(flowchart_data=flowchart_data,
-                      directory_path='flowchart',
-                      equations_dict=equations_dict)  
-    
-    # show_variable_trend(dependant_variables)
-    # identify_dependancy_trend(dependant_variables, independant_variables, test_cases_df)
-    # initialize_edge_and_labels(edges, edge_labels, equations_dict)
-    # create_interactive_graph(edges)
-    # create_graph_image(edges, edge_labels) 
+    # Filter Valid Cases
+    test_cases_df = filter_valid_cases(test_cases_df, domain_rules, conditional_vars)
+
+    # Reporting
+    generate_reports(test_cases_df, condition_hits, equations, dependant_variables, equations_dict, original_total_rows)
+
+    return test_cases_df
     
 
 if __name__ == '__main__':
@@ -514,6 +979,7 @@ if __name__ == '__main__':
     a6 - [0, 2, 1]
     actual_frequency - [7000, 7010, 3]
     present_temperature - [-10, 50, 8]
+    t0 - [50, 100, 20]
     _RANGE_END_TAG_
 
     If Auto_Drift_Estimate Enabled
