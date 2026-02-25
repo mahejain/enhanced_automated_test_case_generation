@@ -22,11 +22,6 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# logging.basicConfig(
-#     level=logging.ERROR,
-#     format="%(asctime)s - %(levelname)s - %(message)s"
-# )
-
 logger = logging.getLogger(__name__)
 
 
@@ -631,14 +626,27 @@ def get_few_shot_prompting_response(FRD = ''):
 
 
 def generate_coverage_report(test_cases_df, condition_hits, all_req_ids, total_rows):
+
     logger.info("\n========== REQUIREMENT COVERAGE REPORT ==========")
 
+    rows = []
+
     for req in sorted(all_req_ids):
-        # count rows where this req appears
-        rows_covered = test_cases_df["executed_requirements"].str.contains(rf"\b{req}\b", regex=True, na=False).sum()
+
+        rows_covered = test_cases_df["executed_requirements"].str.contains(
+            rf"\b{req}\b", regex=True, na=False
+        ).sum()
+
         percent = (rows_covered / total_rows * 100) if total_rows else 0
 
         logger.info(f"{req:10} -> {rows_covered:5} rows  ({percent:.1f}%)")
+
+        rows.append([req, rows_covered, percent])
+
+    coverage_df = pd.DataFrame(
+        rows,
+        columns=["Requirement_ID", "Rows_Covered", "Coverage_%"]
+    )
 
     missing = [
         r for r in all_req_ids
@@ -657,44 +665,39 @@ def generate_coverage_report(test_cases_df, condition_hits, all_req_ids, total_r
         percent = (hits / total_rows * 100) if total_rows else 0
         logger.info(f"{cond:25} -> {hits:5} hits ({percent:.1f}%)")
 
+    # -------- NEW ADDITION --------
+    return coverage_df
+
 
 def compute_test_quality_metrics(df):
-    """
-    Compute quality metrics for generated test cases
-    """
-
-    logger.info("\n===== TEST QUALITY METRICS =====")
 
     total = len(df)
 
-    # 1. Uniqueness
-    # Exclude metadata columns from uniqueness check
     exclude_cols = ["executed_requirements", "executed_requirement_texts"]
     data_cols = [c for c in df.columns if c not in exclude_cols]
-    
+
     unique_rows = len(df[data_cols].drop_duplicates())
-
     uniqueness = unique_rows / total * 100
-    logger.info(f"Unique cases: {unique_rows}/{total} ({uniqueness:.1f}%)")
 
-    # 2. Edge detection (min/max frequency)
     edge_hits = 0
-
-    for col in df.columns:
+    for col in df.select_dtypes(include='number'):
         vals = df[col]
-        if pd.api.types.is_numeric_dtype(vals):
-            edge_hits += ((vals == vals.min()) | (vals == vals.max())).sum()
+        edge_hits += ((vals == vals.min()) | (vals == vals.max())).sum()
 
     numeric_cols = df.select_dtypes(include='number')
-    edge_ratio = edge_hits / (total * len(numeric_cols.columns)) * 100
-    logger.info(f"Edge value usage: {edge_ratio:.1f}%")
+    edge_ratio = edge_hits / (total * len(numeric_cols.columns)) * 100 if len(numeric_cols.columns) else 0
 
-    # 3. Variance (diversity)
-    numeric_cols = df.select_dtypes(include='number')
+    variance = 0
     if not numeric_cols.empty:
         scaled = (numeric_cols - numeric_cols.mean()) / numeric_cols.std(ddof=0)
         variance = scaled.var().mean()
-        logger.info(f"Normalized avg variance: {variance:.4f}")
+
+    stats_df = pd.DataFrame({
+        "Metric": ["Total_cases", "Uniqueness_%", "Edge_usage_%", "Normalized_variance"],
+        "Value": [total, uniqueness, edge_ratio, variance]
+    })
+
+    return stats_df
 
 
 def generate_traceability_matrix(test_cases_df, path="traceability_matrix.csv"):
@@ -887,21 +890,28 @@ def execute_equations(test_cases_df, dependant_variables, equations_dict, consta
 
 def generate_reports(test_cases_df, condition_hits, equations, dependant_variables, equations_dict, original_total_rows):
 
+    os.makedirs("outputs", exist_ok=True)
+
     all_req_ids = [eq["id"] for eq in equations]
 
-    generate_coverage_report(test_cases_df, condition_hits, all_req_ids, original_total_rows)
+    coverage_df = generate_coverage_report(
+        test_cases_df, condition_hits, all_req_ids, original_total_rows
+    )
 
-    compute_test_quality_metrics(test_cases_df)
+    stats_df = compute_test_quality_metrics(test_cases_df)
 
-    logger.debug(test_cases_df.describe(include='all').T)
+    coverage_df.to_csv("outputs/coverage_report.csv", index=False)
+    stats_df.to_csv("outputs/statistics_report.csv", index=False)
 
-    generate_traceability_matrix(test_cases_df)
+    generate_traceability_matrix(test_cases_df, path="outputs/traceability_matrix.csv")
+
+    save_to_csv(test_cases_df, path='outputs/test_cases_generated.csv')
+    generate_html(test_cases_df, path="outputs/test_cases.html")
 
     statistics = get_statistics(dependant_variables, test_cases_df)
-    logger.info(statistics)
 
-    save_to_csv(test_cases_df, path='test_cases_generated.csv')
-    generate_html(test_cases_df, path="test_cases.html")
+    with open("outputs/statistics.txt", "w") as f:
+        f.write(statistics)
 
     create_flow_graph(
         directory_path='flowchart',
@@ -912,6 +922,8 @@ def generate_reports(test_cases_df, condition_hits, equations, dependant_variabl
     edge_labels = {}
     initialize_edge_and_labels(edges, edge_labels, equations_dict)
     create_interactive_graph(edges)
+
+    logger.info("All reports saved inside /outputs folder")
 
 
 random.seed(42)
