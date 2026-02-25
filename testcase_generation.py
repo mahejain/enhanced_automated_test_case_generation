@@ -890,8 +890,6 @@ def execute_equations(test_cases_df, dependant_variables, equations_dict, consta
 
 def generate_reports(test_cases_df, condition_hits, equations, dependant_variables, equations_dict, original_total_rows):
 
-    os.makedirs("outputs", exist_ok=True)
-
     all_req_ids = [eq["id"] for eq in equations]
 
     coverage_df = generate_coverage_report(
@@ -900,21 +898,22 @@ def generate_reports(test_cases_df, condition_hits, equations, dependant_variabl
 
     stats_df = compute_test_quality_metrics(test_cases_df)
 
-    coverage_df.to_csv("outputs/coverage_report.csv", index=False)
-    stats_df.to_csv("outputs/statistics_report.csv", index=False)
+    # Save directly in root
+    coverage_df.to_csv("coverage_report.csv", index=False)
+    stats_df.to_csv("statistics_report.csv", index=False)
 
-    generate_traceability_matrix(test_cases_df, path="outputs/traceability_matrix.csv")
+    generate_traceability_matrix(test_cases_df, path="traceability_matrix.csv")
 
-    save_to_csv(test_cases_df, path='outputs/test_cases_generated.csv')
-    generate_html(test_cases_df, path="outputs/test_cases.html")
+    save_to_csv(test_cases_df, path="test_cases_generated.csv")
+    generate_html(test_cases_df, path="test_cases.html")
 
     statistics = get_statistics(dependant_variables, test_cases_df)
 
-    with open("outputs/statistics.txt", "w") as f:
+    with open("statistics.txt", "w") as f:
         f.write(statistics)
 
     create_flow_graph(
-        directory_path='flowchart',
+        directory_path='flowchart',   # keep this, it's intentional
         equations_dict=equations_dict
     )
 
@@ -923,7 +922,7 @@ def generate_reports(test_cases_df, condition_hits, equations, dependant_variabl
     initialize_edge_and_labels(edges, edge_labels, equations_dict)
     create_interactive_graph(edges)
 
-    logger.info("All reports saved inside /outputs folder")
+    logger.info("All reports saved in project root directory")
 
 
 random.seed(42)
