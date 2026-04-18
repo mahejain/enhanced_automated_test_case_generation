@@ -15,6 +15,8 @@ from prompting import get_few_shot_prompting_response as get_few_shot_response
 from validation import filter_valid_cases
 import random
 import re 
+from reporting import generate_requirement_wise_testcases
+from reporting import generate_requirement_wise_reports
 import logging
 
 logging.basicConfig(
@@ -202,6 +204,35 @@ def add_ranges_for_miscellaneous(
 # ======================================================
 # SAMPLING FUNCTIONS
 # ======================================================
+def split_boundary_and_interior(ranges: dict):
+    """
+    Splits numeric ranges into:
+    - boundary values (min, max)
+    - interior values (everything in between)
+    """
+    boundary = {}
+    interior = {}
+
+    for var, r in ranges.items():
+
+        # numeric range
+        if isinstance(r, list) and len(r) == 3:
+            start, end, step = r
+            values = list(np.arange(start, end + step, step))
+
+            if len(values) >= 2:
+                boundary[var] = [values[0], values[-1]]
+                interior[var] = values[1:-1] if len(values) > 2 else []
+            else:
+                boundary[var] = values
+                interior[var] = []
+
+        else:
+            # categorical -> treat as boundary only
+            boundary[var] = r
+            interior[var] = []
+
+    return boundary, interior
 
 
 def monte_carlo_sampling(ranges: dict, n_samples: int = 100, constraints: dict = None, n_forced: int = 5) -> list:
@@ -260,6 +291,34 @@ def generate_monte_carlo_cases(ranges: dict, n_samples: int = 200) -> pd.DataFra
     return pd.DataFrame(samples)
 
 
+def hybrid_sampling(ranges: dict,
+                    n_boundary: int = 50,
+                    n_interior: int = 150):
+
+    boundary_ranges, interior_ranges = split_boundary_and_interior(ranges)
+
+    samples = []
+
+    # ---- Boundary-focused sampling ----
+    for _ in range(n_boundary):
+        row = {}
+        for var, vals in boundary_ranges.items():
+            if vals:
+                row[var] = random.choice(vals)
+        samples.append(row)
+
+    # ---- Interior sampling ----
+    for _ in range(n_interior):
+        row = {}
+        for var in ranges.keys():
+            if interior_ranges[var]:
+                row[var] = random.choice(interior_ranges[var])
+            else:
+                # fallback to boundary if no interior
+                row[var] = random.choice(boundary_ranges[var])
+        samples.append(row)
+
+    return pd.DataFrame(samples)
 # ======================================================
 # EVALUATION ENGINE
 # ======================================================
@@ -849,14 +908,27 @@ def build_dependency_model(variables, equations, ranges, constants, edge_cases_o
 
 
 def generate_input_samples(ranges, equations, limit=20):
+
     constraints = extract_equality_constraints(equations)
-    
-    samples = monte_carlo_sampling(ranges, n_samples=limit, constraints=constraints, n_forced=5)
-    base_df = pd.DataFrame(samples)
-    
-    monte_df = generate_monte_carlo_cases(ranges, n_samples=200) 
-    
-    test_cases_df = pd.concat([base_df, monte_df], ignore_index=True)
+
+    # Small targeted base sampling (for equality conditions)
+    base_samples = monte_carlo_sampling(
+        ranges,
+        n_samples=limit,
+        constraints=constraints,
+        n_forced=5
+    )
+    base_df = pd.DataFrame(base_samples)
+
+    # Hybrid structured sampling
+    hybrid_df = hybrid_sampling(
+        ranges,
+        n_boundary=80,
+        n_interior=200
+    )
+
+    test_cases_df = pd.concat([base_df, hybrid_df], ignore_index=True)
+
     return test_cases_df
 
 
@@ -888,7 +960,7 @@ def execute_equations(test_cases_df, dependant_variables, equations_dict, consta
     return test_cases_df, condition_hits
 
 
-def generate_reports(test_cases_df, condition_hits, equations, dependant_variables, equations_dict, original_total_rows):
+def generate_reports(test_cases_df, condition_hits, equations, dependant_variables, equations_dict, original_total_rows, ranges):
 
     all_req_ids = [eq["id"] for eq in equations]
 
@@ -897,6 +969,9 @@ def generate_reports(test_cases_df, condition_hits, equations, dependant_variabl
     )
 
     stats_df = compute_test_quality_metrics(test_cases_df)
+
+    logger.info("\n========== STATISTICS REPORT ==========")
+    logger.info("\n%s", stats_df.to_string(index=False))
 
     # Save directly in root
     coverage_df.to_csv("coverage_report.csv", index=False)
@@ -908,6 +983,12 @@ def generate_reports(test_cases_df, condition_hits, equations, dependant_variabl
     generate_html(test_cases_df, path="test_cases.html")
 
     statistics = get_statistics(dependant_variables, test_cases_df)
+    logger.info("\n========== DEPENDANT VARIABLE STATS ==========")
+    logger.info("\n%s", statistics)
+
+    generate_requirement_wise_testcases(test_cases_df,equations, path="requirement_wise_testcases.csv")
+
+    generate_requirement_wise_reports(test_cases_df,equations, ranges)
 
     with open("statistics.txt", "w") as f:
         f.write(statistics)
@@ -972,7 +1053,7 @@ def generate_test_cases(FRD: str = '') -> pd.DataFrame:
     test_cases_df = filter_valid_cases(test_cases_df, domain_rules, conditional_vars)
 
     # Reporting
-    generate_reports(test_cases_df, condition_hits, equations, dependant_variables, equations_dict, original_total_rows)
+    generate_reports(test_cases_df, condition_hits, equations, dependant_variables, equations_dict, original_total_rows, ranges)
 
     return test_cases_df
     

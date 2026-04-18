@@ -1,0 +1,39 @@
+REQ_1
+  Success : 0
+  Edge    : 300
+  Failure : 0
+
+REQ_2
+  Success : 0
+  Edge    : 300
+  Failure : 0
+
+REQ_3
+  Success : 0
+  Edge    : 149
+  Failure : 151
+
+REQ_4
+  Success : 0
+  Edge    : 300
+  Failure : 0
+
+REQ_5
+  Success : 0
+  Edge    : 149
+  Failure : 151
+
+REQ_6
+  Success : 0
+  Edge    : 149
+  Failure : 151
+
+REQ_7
+  Success : 0
+  Edge    : 149
+  Failure : 151
+
+REQ_8
+  Success : 0
+  Edge    : 149
+  Failure : 151

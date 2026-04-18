@@ -20,23 +20,23 @@ Statistics for delfbyf0:
 Minimum: 4085467.0
 Maximum: 179915696.0
 Median: 175636231.0
-Unique values: 50
+Unique values: 57
 
 Statistics for deltaf:
 Minimum: 32683736000.0
 Maximum: 1439325568000.0
 Median: 1405089848000.0
-Unique values: 50
+Unique values: 57
 
 Statistics for new_time_period:
 Minimum: 6.947698398989611e-13
 Maximum: 3.059624992779285e-11
 Median: 7.116982559726059e-13
-Unique values: 50
+Unique values: 57
 
 Statistics for delta_time_period:
 Minimum: -89.9999999999993
 Maximum: -49.999999999969404
 Median: -89.9999999999708
-Unique values: 22
+Unique values: 24
 
